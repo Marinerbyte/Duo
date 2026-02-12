@@ -21,12 +21,10 @@ client = None
 if GROQ_API_KEY:
     client = Groq(api_key=GROQ_API_KEY)
 
-# Global dictionary to store bot instances
 BOTS = {}
 BOT_LOCK = threading.Lock()
 CHAT_LOGS = []
 
-# Mobile User Agents to mimic real phones
 USER_AGENTS = [
     "Mozilla/5.0 (Linux; Android 10; SM-G960U) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.77 Mobile Safari/537.36",
     "Mozilla/5.0 (Linux; Android 11; Pixel 5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/92.0.4515.159 Mobile Safari/537.36",
@@ -34,34 +32,57 @@ USER_AGENTS = [
 ]
 
 # =============================================================================
-# 2. AI & GENERATION LOGIC (Hinglish)
+# 2. AI & GENERATION LOGIC (Refined Role Structure)
 # =============================================================================
-def generate_hinglish_reply(incoming_text, context_history):
+def generate_hinglish_reply(my_username, context_history):
+    """
+    Role-based context handling: 
+    - My previous messages = 'assistant'
+    - Partner's messages = 'user'
+    """
     if not client:
-        return "Are bhai API key nahi hai."
+        return "Bhai API key set karle pehle."
 
     system_prompt = (
-        "You are one real Indian user in a two-person chatroom conversation.\n"
-        "Personality: Calm, casual, natural Hinglish. Type like a normal person on a phone.\n"
-        "Rules: Only one sentence, max 18 words. Don't repeat what the other person said.\n"
-        "No moral lectures, no robotic tone, no mentioning AI."
+        "You are a real Indian user in a private 1-on-1 chatroom.\n"
+        "Your task: Reply to the other user naturally.\n\n"
+        "PERSONALITY:\n"
+        "- Casual, slightly lazy, natural Hinglish (Hindi + English mix).\n"
+        "- Use lower-case sometimes, just like mobile typing.\n"
+        "- Be chill, not over-excited.\n\n"
+        "STRICT CONSTRAINTS:\n"
+        "- Only ONE sentence per reply.\n"
+        "- Maximum 18 words.\n"
+        "- DO NOT echo or repeat what the other person said.\n"
+        "- DO NOT start sentences with the same words used previously.\n"
+        "- DO NOT explain that you are an AI.\n"
+        "- Never act as both users. You are ONLY the Assistant in this conversation.\n\n"
+        "CONTEXT HANDLING:\n"
+        "- Read the chat history carefully to see the flow.\n"
+        "- If the topic is finished, start a very brief new one or give a neutral closing."
     )
+
     try:
         messages = [{"role": "system", "content": system_prompt}]
-        for msg in context_history[-3:]:
-            messages.append({"role": "user", "content": msg})
-        messages.append({"role": "user", "content": incoming_text})
+        
+        # Build structured history: Assign roles based on who sent the message
+        # history structure: [{'sender': 'name', 'text': 'content'}, ...]
+        for entry in context_history:
+            role = "assistant" if entry['sender'] == my_username else "user"
+            messages.append({"role": role, "content": entry['text']})
 
         completion = client.chat.completions.create(
             model="llama-3.1-8b-instant",
             messages=messages,
-            temperature=0.7,
+            temperature=0.8, # Thoda randomness for natural feel
             max_tokens=60,
+            top_p=0.9
         )
         reply = completion.choices[0].message.content
         return reply.replace('"', '').strip()
     except Exception as e:
-        return "Haa bhai sahi baat hai."
+        print(f"AI Error: {e}")
+        return "Hmm, sahi keh raha hai."
 
 # =============================================================================
 # 3. THE BOT CLASS
@@ -71,22 +92,23 @@ class ChatBot:
         self.username = username
         self.password = password
         self.room = room
-        self.partner_name = partner_name
+        self.partner_name = partner_name 
         self.token = ""
         self.user_id = ""
         self.room_id = ""
         self.ws = None
         self.running = False
         self.status = "INIT"
-        self.auto_start = auto_start
-        self.ua = random.choice(USER_AGENTS)
-        self.conversation_history = []
+        self.auto_start = auto_start 
+        self.ua = random.choice(USER_AGENTS) 
+        # Structured history to store roles
+        self.conversation_history = [] 
 
     def log(self, msg):
         timestamp = time.strftime("%H:%M:%S")
         entry = f"[{timestamp}] [{self.username.upper()}]: {msg}"
         CHAT_LOGS.append(entry)
-        if len(CHAT_LOGS) > 50: CHAT_LOGS.pop(0)
+        if len(CHAT_LOGS) > 60: CHAT_LOGS.pop(0)
 
     def login_and_start(self):
         self.running = True
@@ -94,18 +116,16 @@ class ChatBot:
         url = "https://api.howdies.app/api/login"
         payload = {"username": self.username, "password": self.password}
         try:
-            resp = requests.post(url, json=payload, timeout=10)
+            resp = requests.post(url, json=payload, timeout=15)
             if resp.status_code == 200:
                 data = resp.json()
-                # Extract token & id logic
-                self.token = data.get("token") or (data.get("data", {}).get("token"))
+                self.token = data.get("token") or data.get("data", {}).get("token")
                 if self.token:
                     self.status = "CONNECTING..."
                     self.connect_ws()
-                else: self.status = "LOGIN FAILED"
-            else: self.status = f"HTTP ERROR {resp.status_code}"
-        except Exception as e:
-            self.status = "NET ERROR"
+                else: self.status = "NO TOKEN"
+            else: self.status = f"LOGIN ERROR {resp.status_code}"
+        except Exception as e: self.status = f"NET ERROR"
 
     def connect_ws(self):
         ws_url = f"wss://app.howdies.app/howdies?token={self.token}"
@@ -118,12 +138,13 @@ class ChatBot:
         self.ws.run_forever(sslopt={"cert_reqs": ssl.CERT_NONE})
 
     def on_open(self, ws):
-        self.status = "CONNECTED"
-        self.log("Online")
+        self.status = "ONLINE"
+        self.log("Connected to WebSocket.")
         ws.send(json.dumps({"handler": "login", "username": self.username, "password": self.password}))
-        time.sleep(1)
+        time.sleep(1.5)
         ws.send(json.dumps({"handler": "joinchatroom", "id": str(time.time()), "name": self.room, "roomPassword": ""}))
         threading.Thread(target=self.pinger, daemon=True).start()
+        
         if self.auto_start:
             threading.Timer(8.0, self.trigger_first_message).start()
 
@@ -134,8 +155,9 @@ class ChatBot:
             except: break
 
     def trigger_first_message(self):
-        starters = ["Aur bhai kya haal hai?", "Oye sunna", "Kya chal rha hai bhai?", "Hello bhai kidhar hai?"]
-        self.send_msg(random.choice(starters))
+        starters = ["Aur bhai kya haal hain?", "Kya chal raha hai aaj kal?", "Oye free hai kya?", "Bhai ek baat bata"]
+        msg = random.choice(starters)
+        self.send_msg(msg)
 
     def send_msg(self, text):
         if not self.ws: return
@@ -144,7 +166,9 @@ class ChatBot:
         try:
             self.ws.send(json.dumps(pkt))
             self.log(f"Sent: {text}")
-            self.conversation_history.append(text)
+            # Add to history as ASSISTANT role for this bot
+            self.conversation_history.append({"sender": self.username, "text": text})
+            if len(self.conversation_history) > 10: self.conversation_history.pop(0)
         except: pass
 
     def on_message(self, ws, message):
@@ -154,17 +178,25 @@ class ChatBot:
             if data.get("handler") in ["chatroommessage", "message"]:
                 sender = data.get("from") or data.get("username")
                 msg_text = data.get("text") or data.get("body")
-                if sender and msg_text and sender.lower() == self.partner_name.lower():
-                    self.conversation_history.append(msg_text)
-                    threading.Thread(target=self.process_reply, args=(msg_text,)).start()
+                
+                if sender and msg_text and sender != self.username:
+                    if self.partner_name and sender.lower() == self.partner_name.lower():
+                        self.log(f"Message from {sender}: {msg_text}")
+                        # Add to history as USER role
+                        self.conversation_history.append({"sender": sender, "text": msg_text})
+                        if len(self.conversation_history) > 10: self.conversation_history.pop(0)
+                        
+                        threading.Thread(target=self.process_reply).start()
         except: pass
 
-    def process_reply(self, incoming_text):
-        time.sleep(random.uniform(5.0, 10.0))
-        reply = generate_hinglish_reply(incoming_text, self.conversation_history)
+    def process_reply(self):
+        # Typing delay
+        time.sleep(random.uniform(6.0, 11.0))
+        # Pass full structured history
+        reply = generate_hinglish_reply(self.username, self.conversation_history)
         self.send_msg(reply)
 
-    def on_error(self, ws, error): self.status = "ERROR"
+    def on_error(self, ws, error): self.log(f"WS Error: {error}")
     def on_close(self, ws, c, m): 
         self.status = "OFFLINE"
         self.running = False
@@ -193,7 +225,6 @@ def start_bots():
         for b in BOTS.values(): b.stop()
         BOTS.clear()
 
-        # Bot Setup
         bot1 = ChatBot(u1, pwd, room, partner_name=u2, auto_start=True)
         bot2 = ChatBot(u2, pwd, room, partner_name=u1, auto_start=False)
         BOTS['bot1'], BOTS['bot2'] = bot1, bot2
@@ -202,13 +233,13 @@ def start_bots():
         threading.Thread(target=bot1.login_and_start, daemon=True).start()
         
         # --- THE 10 SECOND GAP ---
-        # Bot 1 ke baad Bot 2 ke login mein 10 second ka distance
-        time.sleep(10) 
+        print(f"[System] Bot 1 started. Waiting 10s for Bot 2...")
+        time.sleep(10)
         
         # Start Bot 2
         threading.Thread(target=bot2.login_and_start, daemon=True).start()
 
-    return jsonify({"status": "success", "message": "Login distance active (10s). Bots launching..."})
+    return jsonify({"status": "success", "message": "Bots launching with 10s gap and structured AI logic."})
 
 @app.route('/stop_bots', methods=['POST'])
 def stop_bots():
@@ -223,60 +254,99 @@ def get_status():
     with BOT_LOCK:
         status_data['bot1'] = f"{BOTS['bot1'].username}: {BOTS['bot1'].status}" if 'bot1' in BOTS else "OFFLINE"
         status_data['bot2'] = f"{BOTS['bot2'].username}: {BOTS['bot2'].status}" if 'bot2' in BOTS else "OFFLINE"
-    return jsonify({"bots": status_data, "logs": CHAT_LOGS[-15:]})
+    return jsonify({"bots": status_data, "logs": CHAT_LOGS[-18:]})
 
 # =============================================================================
-# 5. HTML DASHBOARD
+# 5. HTML DASHBOARD (FULL STYLED)
 # =============================================================================
 DASHBOARD_HTML = """
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
+    <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>DuoChat Control</title>
+    <title>DuoChat Pro AI</title>
     <style>
-        body { background: #121212; color: #e0e0e0; font-family: sans-serif; display: flex; flex-direction: column; align-items: center; padding: 20px; }
-        .container { background: #1e1e1e; padding: 20px; border-radius: 10px; width: 100%; max-width: 400px; }
-        input { width: 100%; padding: 10px; margin: 8px 0; background: #2c2c2c; border: 1px solid #444; color: #fff; border-radius: 5px; box-sizing: border-box; }
-        button { width: 48%; padding: 12px; border-radius: 5px; border: none; font-weight: bold; cursor: pointer; }
-        .btn-start { background: #00e676; color: #000; }
-        .btn-stop { background: #ff5252; color: #fff; }
-        .status-box { background: #000; padding: 10px; margin-top: 20px; border-radius: 5px; font-family: monospace; font-size: 11px; height: 180px; overflow-y: auto; border: 1px solid #333; }
-        .bot-info { display: flex; justify-content: space-between; font-size: 13px; margin: 10px 0; color: #00e676; }
+        body { background: #0f0f0f; color: #cfcfcf; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; display: flex; flex-direction: column; align-items: center; padding: 20px; }
+        .card { background: #1a1a1a; padding: 25px; border-radius: 15px; box-shadow: 0 10px 30px rgba(0,0,0,0.7); width: 100%; max-width: 450px; border: 1px solid #333; }
+        h2 { text-align: center; color: #00ff88; margin-bottom: 25px; text-transform: uppercase; letter-spacing: 3px; }
+        .input-box { margin-bottom: 15px; }
+        label { display: block; font-size: 0.8em; margin-bottom: 5px; color: #888; text-transform: uppercase; }
+        input { width: 100%; padding: 12px; background: #252525; border: 1px solid #444; color: #fff; border-radius: 8px; box-sizing: border-box; outline: none; transition: 0.3s; }
+        input:focus { border-color: #00ff88; box-shadow: 0 0 10px rgba(0,255,136,0.2); }
+        .status-area { display: flex; justify-content: space-between; margin: 20px 0; padding: 10px; background: #000; border-radius: 8px; border: 1px solid #333; }
+        .status-text { font-size: 12px; font-weight: bold; color: #00ff88; }
+        .btn-row { display: flex; gap: 10px; }
+        button { flex: 1; padding: 13px; border-radius: 8px; border: none; font-weight: bold; cursor: pointer; transition: 0.2s; text-transform: uppercase; }
+        .btn-start { background: #00ff88; color: #000; }
+        .btn-start:hover { background: #00cc6e; transform: translateY(-2px); }
+        .btn-stop { background: #ff4d4d; color: #fff; }
+        .btn-stop:hover { background: #e60000; transform: translateY(-2px); }
+        .log-container { margin-top: 25px; background: #050505; border-radius: 8px; padding: 12px; height: 200px; overflow-y: auto; border: 1px solid #222; font-family: 'Courier New', monospace; font-size: 11px; line-height: 1.5; }
+        .log-entry { margin-bottom: 5px; border-bottom: 1px solid #111; padding-bottom: 2px; }
     </style>
 </head>
 <body>
-    <div class="container">
-        <h3 style="text-align:center;">DuoChat AI Bot</h3>
-        <input id="u1" placeholder="Username Bot A">
-        <input id="u2" placeholder="Username Bot B">
-        <input id="p" type="password" placeholder="Password">
-        <input id="r" placeholder="Room Name">
-        
-        <div class="bot-info">
-            <span id="st-b1">Bot 1: OFFLINE</span>
-            <span id="st-b2">Bot 2: OFFLINE</span>
+    <div class="card">
+        <h2>DuoChat Pro</h2>
+        <div style="display:flex; gap:10px;">
+            <div class="input-box" style="flex:1;">
+                <label>Bot A</label>
+                <input id="u1" placeholder="User 1">
+            </div>
+            <div class="input-box" style="flex:1;">
+                <label>Bot B</label>
+                <input id="u2" placeholder="User 2">
+            </div>
+        </div>
+        <div class="input-box">
+            <label>Common Password</label>
+            <input id="p" type="password" placeholder="••••••••">
+        </div>
+        <div class="input-group">
+            <label>Target Room</label>
+            <input id="r" placeholder="Room Name">
         </div>
 
-        <div style="display:flex; justify-content: space-between;">
-            <button class="btn-start" onclick="startBots()">START</button>
-            <button class="btn-stop" onclick="stopBots()">STOP</button>
+        <div class="status-area">
+            <div id="st-b1" class="status-text">A: OFFLINE</div>
+            <div id="st-b2" class="status-text">B: OFFLINE</div>
         </div>
 
-        <div class="status-box" id="logs">Logs will appear here...</div>
+        <div class="btn-row">
+            <button class="btn-start" onclick="startBots()">Launch Bots</button>
+            <button class="btn-stop" onclick="stopBots()">Shutdown</button>
+        </div>
+
+        <div class="log-container" id="logs">
+            <div class="log-entry">[System] Waiting for user action...</div>
+        </div>
     </div>
 
     <script>
         function startBots() {
-            const data = { u1: document.getElementById('u1').value, u2: document.getElementById('u2').value, p: document.getElementById('p').value, r: document.getElementById('r').value };
-            fetch('/start_bots', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(data) });
+            const payload = { 
+                u1: document.getElementById('u1').value, 
+                u2: document.getElementById('u2').value, 
+                p: document.getElementById('p').value, 
+                r: document.getElementById('r').value 
+            };
+            if(!payload.u1 || !payload.u2 || !payload.p || !payload.r) return alert("Fill everything!");
+            fetch('/start_bots', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(payload)
+            });
         }
         function stopBots() { fetch('/stop_bots', {method: 'POST'}); }
+        
         setInterval(() => {
             fetch('/get_status').then(r => r.json()).then(d => {
                 document.getElementById('st-b1').innerText = d.bots.bot1;
                 document.getElementById('st-b2').innerText = d.bots.bot2;
-                document.getElementById('logs').innerHTML = d.logs.map(l => `<div>${l}</div>`).join('');
+                const logBox = document.getElementById('logs');
+                logBox.innerHTML = d.logs.map(l => `<div class="log-entry">${l}</div>`).join('');
+                logBox.scrollTop = logBox.scrollHeight;
             });
         }, 2000);
     </script>
@@ -285,4 +355,5 @@ DASHBOARD_HTML = """
 """
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 5000)))
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host='0.0.0.0', port=port)
